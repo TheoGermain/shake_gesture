@@ -1,7 +1,14 @@
-name: shake_gesture_root
-
+name: _
+publish_to: none
 environment:
-  sdk: ">=3.0.0 <4.0.0"
+  sdk: ">=3.6.0 <4.0.0"
   flutter: ">=1.20.0"
-dependencies:
-  melos: ^3.1.1
+dev_dependencies:
+  melos: ^6.3.3
+workspace:
+  - shake_gesture
+  - shake_gesture_android
+  - shake_gesture_ios
+  - shake_gesture_platform_interface
+  - shake_gesture_test_helper
+  - shake_gesture/example
