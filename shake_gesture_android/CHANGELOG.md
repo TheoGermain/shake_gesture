@@ -1,3 +1,10 @@
+## 2.0.0
+
+> Note: This release has breaking changes.
+
+ - **FEAT**: enhance shake detection logic with direction change tracking.
+ - **BREAKING** **FEAT**: improve shake detection on Android.
+
 ## 1.1.5
 
  - **FIX**: fix custom shake force.

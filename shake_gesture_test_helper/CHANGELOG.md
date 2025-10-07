@@ -1,3 +1,9 @@
+## 2.0.0
+
+> Note: This release has breaking changes.
+
+ - **BREAKING** **FEAT**: improve shake detection on Android.
+
 ## 1.1.0
 
  - **FEAT**: add namespace to shake_gesture_test_helper Android project.

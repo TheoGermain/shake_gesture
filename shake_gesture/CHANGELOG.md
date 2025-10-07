@@ -1,3 +1,9 @@
+## 2.0.0
+
+> Note: This release has breaking changes.
+
+ - **BREAKING** **FEAT**: improve shake detection on Android.
+
 ## 1.2.0
 
  - **FEAT**: use imperatively.
