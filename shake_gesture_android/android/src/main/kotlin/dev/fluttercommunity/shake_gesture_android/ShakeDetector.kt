@@ -6,9 +6,16 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import java.util.concurrent.TimeUnit
 import android.util.Log
 
+/**
+ * Detects phone shaking. If more than 75% of the samples taken in the past 0.5s are
+ * accelerating, the device is a) shaking, or b) free falling 1.84m (h =
+ * 1/2*g*t^2*3/4).
+ *
+ * @author Bob Lee (bob@squareup.com)
+ * @author Eric Burke (eric@squareup.com)
+ */
 class ShakeDetector(context: Context, private val listener: OnShakeListener) : SensorEventListener {
 
     private var sensorManager: SensorManager? = null
@@ -35,106 +42,189 @@ class ShakeDetector(context: Context, private val listener: OnShakeListener) : S
         // Not used
     }
 
-    // Collect sensor data in this interval (nanoseconds)
-    private val MIN_TIME_BETWEEN_SAMPLES_NS =
-        TimeUnit.NANOSECONDS.convert(15, TimeUnit.MILLISECONDS)
-
-    // Number of nanoseconds to listen for and count shakes (nanoseconds)
-    private val SHAKING_WINDOW_NS = TimeUnit.NANOSECONDS.convert(200, TimeUnit.MILLISECONDS)
-
-    // Required force to constitute a shake.
-    val customShakeForce = context.packageManager.getApplicationInfo(
+    /**
+     * When the magnitude of total acceleration exceeds this
+     * value, the phone is accelerating.
+     */
+    private val customShakeForce = context.packageManager.getApplicationInfo(
         context.packageName,
         PackageManager.GET_META_DATA
     ).metaData.get("dev.fluttercommunity.shake_gesture_android.SHAKE_FORCE")
 
-    val SHAKE_FORCE: Float = when (customShakeForce) {
+    private val SHAKE_FORCE: Float = when (customShakeForce) {
         is Int -> customShakeForce.toFloat()
         is Float -> customShakeForce
         else -> 6f
     }
 
-    private val REQUIRED_FORCE_SQUARED = SensorManager.GRAVITY_EARTH * SensorManager.GRAVITY_EARTH + SHAKE_FORCE * SHAKE_FORCE
+    private val ACCELERATION_THRESHOLD_SQUARED =
+        SensorManager.GRAVITY_EARTH * SensorManager.GRAVITY_EARTH + SHAKE_FORCE * SHAKE_FORCE
 
-    private var mAccelerationX = 0f
-    private  var mAccelerationY = 0f
-    private  var mAccelerationZ = 0f
-
-    private var mLastTimestamp: Long = 0
-    private var mNumShakes = 0
-    private var mLastShakeTimestamp: Long = 0
-
-    // number of shakes required to trigger onShake()
-    private val mMinNumShakes = context.packageManager.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA).metaData.getInt("dev.fluttercommunity.shake_gesture_android.MIN_NUM_SHAKES", 6)
+    private val queue = SampleQueue()
 
     init {
         Log.v("ShakeDetector", "Required shake force is $SHAKE_FORCE")
-        Log.v("ShakeDetector", "Minimum number of shakes is $mMinNumShakes")
-    }
-
-    /** Reset all variables used to keep track of number of shakes recorded.  */
-    private fun reset() {
-        mNumShakes = 0
-        mAccelerationX = 0f
-        mAccelerationY = 0f
-        mAccelerationZ = 0f
-    }
-
-    /**
-     * Determine if acceleration applied to sensor is large enough to count as a rage shake.
-     *
-     * @param a acceleration squared
-     * @return true if the magnitude of the force exceeds the minimum required amount of force. false
-     * otherwise.
-     */
-    private fun atLeastRequiredForce(a: Float): Boolean {
-        return a > REQUIRED_FORCE_SQUARED
-    }
-
-    /**
-     * Save data about last shake
-     *
-     * @param timestamp (ns) of last sensor event
-     */
-    private fun recordShake(timestamp: Long) {
-        mLastShakeTimestamp = timestamp
-        mNumShakes++
     }
 
     override fun onSensorChanged(sensorEvent: SensorEvent) {
-        if (sensorEvent.timestamp - mLastTimestamp < MIN_TIME_BETWEEN_SAMPLES_NS) {
-            return
-        }
         val ax = sensorEvent.values[0]
         val ay = sensorEvent.values[1]
         val az = sensorEvent.values[2]
+        val timestamp = sensorEvent.timestamp
 
-        mLastTimestamp = sensorEvent.timestamp
-        processAccelerationData(ax, ay, az)
+        addAccelerometerEvent(ax, ay, az, timestamp)
     }
 
-    fun processAccelerationData(ax: Float, ay: Float, az: Float) {
-        val acceleration = ax * ax + ay * ay + az * az
-        if (atLeastRequiredForce(acceleration) && ax * mAccelerationX < 0) {
-            recordShake(mLastTimestamp)
-            mAccelerationX = ax
-        } else if (atLeastRequiredForce(acceleration) && ay * mAccelerationY < 0) {
-            recordShake(mLastTimestamp)
-            mAccelerationY = ay
-        } else if (atLeastRequiredForce(acceleration) && az * mAccelerationZ < 0) {
-            recordShake(mLastTimestamp)
-            mAccelerationZ = az
-        }
-        maybeDispatchShake(mLastTimestamp)
-    }
-
-    private fun maybeDispatchShake(currentTimestamp: Long) {
-        if (mNumShakes >= mMinNumShakes) {
-            reset()
+    /**
+     * Add an accelerometer event to this detectors queue to sample and
+     * reasonably detect shaking events
+     */
+    fun addAccelerometerEvent(ax: Float, ay: Float, az: Float, timestamp: Long) {
+        val accelerating = isAccelerating(ax, ay, az)
+        queue.add(timestamp, accelerating)
+        if (queue.isShaking) {
+            queue.clear()
             listener.onShake()
         }
-        if (currentTimestamp - mLastShakeTimestamp > SHAKING_WINDOW_NS) {
-            reset()
+    }
+
+    fun clear() {
+        queue.clear()
+    }
+
+    /** Returns true if the device is currently accelerating.  */
+    private fun isAccelerating(ax: Float, ay: Float, az: Float): Boolean {
+        // Instead of comparing magnitude to ACCELERATION_THRESHOLD,
+        // compare their squares. This is equivalent and doesn't need the
+        // actual magnitude, which would be computed using (expensive) Math.sqrt().
+        val magnitudeSquared = (ax * ax + ay * ay + az * az).toDouble()
+        return magnitudeSquared > ACCELERATION_THRESHOLD_SQUARED
+    }
+
+    /** Queue of samples. Keeps a running average.  */
+    internal class SampleQueue {
+        private val pool = SamplePool()
+
+        private var oldest: Sample? = null
+        private var newest: Sample? = null
+        private var sampleCount = 0
+        private var acceleratingCount = 0
+
+        /**
+         * Adds a sample.
+         *
+         * @param timestamp    in nanoseconds of sample
+         * @param accelerating true if > acceleration threshold.
+         */
+        fun add(timestamp: Long, accelerating: Boolean) {
+            // Purge samples that proceed window.
+            purge(timestamp - MAX_WINDOW_SIZE)
+
+            // Add the sample to the queue.
+            val added = pool.acquire()
+            added.timestamp = timestamp
+            added.accelerating = accelerating
+            added.next = null
+            if (newest != null) {
+                newest!!.next = added
+            }
+            newest = added
+            if (oldest == null) {
+                oldest = added
+            }
+
+            // Update running average.
+            sampleCount++
+            if (accelerating) {
+                acceleratingCount++
+            }
+        }
+
+        /** Removes all samples from this queue.  */
+        fun clear() {
+            while (oldest != null) {
+                val removed: Sample = oldest!!
+                oldest = removed.next
+                pool.release(removed)
+            }
+            newest = null
+            sampleCount = 0
+            acceleratingCount = 0
+        }
+
+        /** Purges samples with timestamps older than cutoff.  */
+        fun purge(cutoff: Long) {
+            while (sampleCount >= MIN_QUEUE_SIZE && oldest != null && cutoff - oldest!!.timestamp > 0) {
+                // Remove sample.
+                val removed: Sample = oldest!!
+                if (removed.accelerating) {
+                    acceleratingCount--
+                }
+                sampleCount--
+
+                oldest = removed.next
+                if (oldest == null) {
+                    newest = null
+                }
+                pool.release(removed)
+            }
+        }
+
+        val isShaking: Boolean
+            /**
+             * Returns true if we have enough samples and more than 3/4 of those samples
+             * are accelerating.
+             */
+            get() = newest != null && oldest != null &&
+                newest!!.timestamp - oldest!!.timestamp >= MIN_WINDOW_SIZE &&
+                acceleratingCount >= (sampleCount shr 1) + (sampleCount shr 2)
+
+        companion object {
+            /** Window size in ns. Used to compute the average.  */
+            private const val MAX_WINDOW_SIZE: Long = 500000000 // 0.5s
+            private const val MIN_WINDOW_SIZE = MAX_WINDOW_SIZE shr 1 // 0.25s
+
+            /**
+             * Ensure the queue size never falls below this size, even if the device
+             * fails to deliver this many events during the time window. The LG Ally
+             * is one such device.
+             */
+            private const val MIN_QUEUE_SIZE = 4
+        }
+    }
+
+    /** An accelerometer sample.  */
+    internal class Sample {
+        /** Time sample was taken.  */
+        var timestamp: Long = 0
+
+        /** If acceleration > acceleration threshold.  */
+        var accelerating: Boolean = false
+
+        /** Next sample in the queue or pool.  */
+        var next: Sample? = null
+    }
+
+    /** Pools samples. Avoids garbage collection.  */
+    internal class SamplePool {
+        private var head: Sample? = null
+
+        /** Acquires a sample from the pool.  */
+        fun acquire(): Sample {
+            var acquired = head
+            if (acquired == null) {
+                acquired = Sample()
+            } else {
+                // Remove instance from pool.
+                head = acquired.next
+            }
+            return acquired
+        }
+
+        /** Returns a sample to the pool.  */
+        fun release(sample: Sample) {
+            sample.next = head
+            head = sample
         }
     }
 }

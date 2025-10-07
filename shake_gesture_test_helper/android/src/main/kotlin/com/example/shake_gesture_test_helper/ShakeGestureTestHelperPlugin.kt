@@ -40,9 +40,24 @@ class ShakeGestureTestHelperPlugin : FlutterPlugin, MethodCallHandler {
 
     private fun shake() {
         ShakeGesturePlugin.shakeDetector?.let { shakeDetector ->
-            for (i in 1..6) {
-                val direction = if (i % 2 == 0) 1 else -1
-                shakeDetector.processAccelerationData(direction * 8f, SensorManager.GRAVITY_EARTH, 0f)
+            // Simulate a shake by adding multiple accelerating samples over time
+            // The new algorithm requires 75% of samples in a 0.25-0.5s window to be accelerating
+            val startTime = System.nanoTime()
+            val intervalNs = 20_000_000L // 20ms between samples
+
+            // Clear any previous samples
+            shakeDetector.clear()
+
+            // Add 20 samples over 400ms, all with high acceleration
+            // This ensures > 75% are accelerating to trigger shake detection
+            for (i in 0..19) {
+                val timestamp = startTime + (i * intervalNs)
+                // Alternate direction to simulate shaking motion
+                val ax = if (i % 2 == 0) 15f else -15f
+                val ay = SensorManager.GRAVITY_EARTH
+                val az = 0f
+
+                shakeDetector.addAccelerometerEvent(ax, ay, az, timestamp)
             }
         }
     }

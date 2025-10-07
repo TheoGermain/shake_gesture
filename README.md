@@ -129,9 +129,6 @@ This can be overriden in your `AndroidManifest.xml` file:
         <meta-data
             android:name="dev.fluttercommunity.shake_gesture_android.SHAKE_FORCE"
             android:value="4" />
-        <meta-data
-            android:name="dev.fluttercommunity.shake_gesture_android.MIN_NUM_SHAKES"
-            android:value="3" />
     </application>
 </manifest>
 ```
